@@ -231,6 +231,8 @@ func setupEnvironment() (bool, error) {
 		topics := md.Topics
 		queues := configuration["queues"].([]interface{})
 
+		createTopic(configuration["reporting_queue"].(string), 10)
+
 		for _, queue := range queues {
 			found := false
 			partitionSizeDifference := 0
