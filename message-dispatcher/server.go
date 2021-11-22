@@ -15,16 +15,13 @@ import (
 var consumerClient *kafka.Consumer
 var producerClient *kafka.Producer
 var configuration map[string]interface{}
+var nextSubcriptionTarget string
 
 func main() {
 	setupEnvironment()
-	consumerClient.SubscribeTopics([]string{"messaging_otp", "messaging_trx", "messaging_cmp"}, nil)
+	consumerClient.SubscribeTopics([]string{nextSubcriptionTarget}, nil)
+	fmt.Printf("Registered to: %s\n", nextSubcriptionTarget)
 	defer consumerClient.Close()
-
-	otpChannel := make(chan common_models.Message, 200)
-	trxChannel := make(chan common_models.Message, 200)
-	cmpChannel := make(chan common_models.Message, 200)
-	go processChannels(otpChannel, trxChannel, cmpChannel)
 
 	for {
 		msg, err := consumerClient.ReadMessage(-1)
@@ -32,50 +29,18 @@ func main() {
 			var result common_models.Message
 			json.Unmarshal(msg.Value, &result)
 			result.ReceivedOn = time.Now().UnixNano()
-
-			go assignToChannel(otpChannel, trxChannel, cmpChannel, result)
+			messageProcessor(result)
 		} else {
 			fmt.Printf("Consumer error: %v (%v)\n", err, msg)
 		}
 	}
 }
 
-func assignToChannel(otpChannel chan common_models.Message, trxChannel chan common_models.Message, cmpChannel chan common_models.Message, result common_models.Message) {
-	switch result.Type {
-	case common_models.OneTimePassword:
-		otpChannel <- result
-	case common_models.Transactional:
-		trxChannel <- result
-	case common_models.Campaing:
-		cmpChannel <- result
-	}
-}
-
-func processChannels(otpChannel chan common_models.Message, trxChannel chan common_models.Message, cmpChannel chan common_models.Message) {
-	for {
-		if len(otpChannel) > 0 {
-			message := <-otpChannel
-			fmt.Printf("1️⃣ Message processed: %s -> Missing: %d\n", message.Message, len(otpChannel))
-			messageProcessor(message)
-		} else if len(trxChannel) > 0 {
-			message := <-trxChannel
-			fmt.Printf("2️⃣ Message processed: %s -> Missing: %d\n", message.Message, len(trxChannel))
-			messageProcessor(message)
-		} else if len(cmpChannel) > 0 {
-			message := <-cmpChannel
-			fmt.Printf("3️⃣ Message processed: %s -> Missing: %d\n", message.Message, len(cmpChannel))
-			messageProcessor(message)
-		}
-		// Polling every half a second
-		time.Sleep(500 * time.Millisecond)
-	}
-}
-
 // Stubbed function that makes thread sleep for two senconds to mimic the time it would take to send a message to a mobile device
 func messageProcessor(message common_models.Message) {
-	message.ProcessedOn = time.Now().UnixNano()
+	fmt.Printf("FROM QUEUE [%s] Message processed: %s\n", nextSubcriptionTarget, message.Message)
 	produce(message)
-	time.Sleep(10 * time.Millisecond)
+	message.ProcessedOn = time.Now().UnixNano()
 }
 
 func produce(message common_models.Message) {
@@ -99,6 +64,35 @@ func produce(message common_models.Message) {
 }
 
 func setupEnvironment() error {
+	err := setKafkaConfiguration()
+	if err != nil {
+		return err
+	}
+
+	err = setupServerConsumerTarget()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func setupServerConsumerTarget() error {
+	url := "http://0.0.0.0:3000/register_consumer"
+	body, err := getRequest(url)
+
+	if err != nil {
+		return errors.New("couldn't retrieve information form provisioning service")
+	}
+
+	if body["result"] == "registered" {
+		nextSubcriptionTarget = body["subscription_target"].(string)
+	}
+
+	return err
+}
+
+func setKafkaConfiguration() error {
 	url := "http://localhost:3010/config/kafka_service_config"
 	body, err := getRequest(url)
 

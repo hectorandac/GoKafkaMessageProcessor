@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -24,14 +25,12 @@ import (
 var configuration map[string]interface{}
 var kafkaAdminClient *kafka.AdminClient
 
-var requestPerSecond float64
-var messagesReceivedPerSecond float64
-var messageProcessedPerSecond float64
-
 var processDuration int64 = 0
 var processedMessages int = 0
 
 var messagesPerSecond map[string]int64 = make(map[string]int64)
+var registeredConsumers map[string]int64 = make(map[string]int64)
+var queuesPriorities map[string]float64 = make(map[string]float64)
 
 func main() {
 
@@ -41,6 +40,9 @@ func main() {
 
 	setupEnvironment()
 
+	fmt.Println(registeredConsumers)
+	fmt.Println(queuesPriorities)
+
 	go consumeReporting()
 
 	m.Get("/health", health)
@@ -49,6 +51,7 @@ func main() {
 	m.Patch("/sender/:sender_name/validate", func(params martini.Params, r render.Render, db *mgo.Database) { validateSender(true, params, r, db) })
 	m.Patch("/sender/:sender_name/invalidate", func(params martini.Params, r render.Render, db *mgo.Database) { validateSender(false, params, r, db) })
 	m.Get("/sender/:sender_name", showValidate)
+	m.Get("/register_consumer", register_consumer)
 
 	m.RunOnAddr(":3000")
 }
@@ -111,6 +114,48 @@ func health(r render.Render, db *mgo.Database) {
 	}
 
 	r.JSON(200, healthResult)
+}
+
+func register_consumer(r render.Render, db *mgo.Database) {
+	var err error
+
+	var totalConsumersAmount int64 = 1
+	for _, element := range registeredConsumers {
+		totalConsumersAmount += int64(element)
+	}
+
+	highestDifferenceKey := ""
+	previousDifference := 0
+	for key, element := range queuesPriorities {
+		expectedAmount := int64(math.Round(float64(totalConsumersAmount) * element))
+		difference := expectedAmount - registeredConsumers[key]
+		fmt.Printf("%s: %d\n", key, difference)
+		if previousDifference < int(difference) {
+			highestDifferenceKey = key
+			previousDifference = int(difference)
+		}
+	}
+
+	if highestDifferenceKey == "" {
+		previousPriority := 0.0
+		for key, element := range queuesPriorities {
+			if element >= previousPriority {
+				previousPriority = element
+				highestDifferenceKey = key
+			}
+		}
+	}
+
+	registeredConsumers[highestDifferenceKey] += 1
+	subscription_target := highestDifferenceKey
+
+	fmt.Println(registeredConsumers)
+
+	if err != nil {
+		r.JSON(400, map[string]interface{}{"error": err.Error()})
+	} else {
+		r.JSON(200, map[string]interface{}{"result": "registered", "subscription_target": subscription_target})
+	}
 }
 
 func reconfigure(r render.Render, db *mgo.Database) {
@@ -204,6 +249,9 @@ func setupEnvironment() (bool, error) {
 				removeTopic(info["name"].(string))
 				createTopic(info["name"].(string), int(info["partitions"].(float64)))
 			}
+
+			registeredConsumers[info["name"].(string)] = 0
+			queuesPriorities[info["name"].(string)] = info["priority"].(float64) / 100.0
 		}
 	}
 
